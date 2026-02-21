@@ -6,7 +6,7 @@ install:
 	poetry install
 
 run:
-	poetry run flask --app app.factory:create_app run --port 5000 --reload
+	poetry run flask --app app.factory:create_app run --port 8000 --reload
 
 worker:
 	poetry run celery -A app.worker:celery_app worker --loglevel=info --beat

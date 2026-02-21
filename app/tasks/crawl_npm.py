@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 from celery import shared_task
@@ -21,11 +22,47 @@ def _run_async(coro: object) -> object:
     try:
         return loop.run_until_complete(coro)
     finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
 
 
+async def _fetch_npm_changes(client: NpmClient, since_seq: str) -> object:
+    """Fetch npm changes and close the client in the same event loop."""
+    try:
+        return await client.fetch_changes(since_seq)
+    finally:
+        await client.close()
+
+
+async def _fetch_npm_detail(client: NpmClient, name: str) -> tuple:
+    """Fetch package detail + versions and close the client in the same loop."""
+    try:
+        metadata = await client.fetch_package_detail(name)
+        versions = await client.fetch_versions(name)
+        return metadata, versions
+    finally:
+        await client.close()
+
+
+async def _fetch_npm_downloads_batch(
+    client: NpmClient, names: list[str]
+) -> list[tuple[str, list]]:
+    """Fetch downloads for a batch of packages, then close client."""
+    results: list[tuple[str, list]] = []
+    try:
+        for name in names:
+            try:
+                stats = await client.fetch_downloads(name)
+                results.append((name, stats))
+            except Exception:
+                logger.warning("Failed to fetch downloads for %s", name)
+    finally:
+        await client.close()
+    return results
+
+
 @shared_task(name="crawl_npm_package_list")
-def crawl_npm_package_list() -> CrawlListResult:
+def crawl_npm_package_list() -> dict:
     """Crawl npm registry changes feed. Incremental via CouchDB seq."""
     db = get_task_session()
     try:
@@ -38,8 +75,7 @@ def crawl_npm_package_list() -> CrawlListResult:
         since_seq: str = state.cursor if state and state.cursor else "0"
 
         client = NpmClient()
-        result = _run_async(client.fetch_changes(since_seq))
-        _run_async(client.close())
+        result = _run_async(_fetch_npm_changes(client, since_seq))
 
         new_count: int = 0
         for name in result.package_names:
@@ -75,7 +111,7 @@ def crawl_npm_package_list() -> CrawlListResult:
 
         db.commit()
         logger.info("npm package list crawl: %d packages processed", new_count)
-        return CrawlListResult(processed=new_count, cursor=result.last_seq)
+        return asdict(CrawlListResult(processed=new_count, cursor=result.last_seq))
     except Exception as e:
         db.rollback()
         logger.exception("npm package list crawl failed")
@@ -85,14 +121,12 @@ def crawl_npm_package_list() -> CrawlListResult:
 
 
 @shared_task(name="crawl_npm_package_detail")
-def crawl_npm_package_detail(package_name: str) -> CrawlDetailResult:
+def crawl_npm_package_detail(package_name: str) -> dict:
     """Crawl detail for a single npm package and upsert into the database."""
     db = get_task_session()
     try:
         client = NpmClient()
-        metadata = _run_async(client.fetch_package_detail(package_name))
-        versions = _run_async(client.fetch_versions(package_name))
-        _run_async(client.close())
+        metadata, versions = _run_async(_fetch_npm_detail(client, package_name))
 
         maintainers_json: list[dict[str, str | None]] = [
             {"name": m.name, "email": m.email} for m in metadata.maintainers
@@ -149,7 +183,7 @@ def crawl_npm_package_detail(package_name: str) -> CrawlDetailResult:
 
         db.commit()
         logger.info("npm detail crawl: %s", package_name)
-        return CrawlDetailResult(package=package_name, status="ok")
+        return asdict(CrawlDetailResult(package=package_name, status="ok"))
     except Exception as e:
         db.rollback()
         logger.exception("npm detail crawl failed for %s", package_name)
@@ -159,46 +193,43 @@ def crawl_npm_package_detail(package_name: str) -> CrawlDetailResult:
 
 
 @shared_task(name="crawl_npm_downloads_batch")
-def crawl_npm_downloads_batch(package_names: list[str]) -> CrawlBatchResult:
+def crawl_npm_downloads_batch(package_names: list[str]) -> dict:
     """Crawl download stats for a batch of npm packages."""
     db = get_task_session()
     processed: int = 0
     try:
         client = NpmClient()
-        for name in package_names:
-            try:
-                stats = _run_async(client.fetch_downloads(name))
-                pkg = db.execute(
-                    select(Package).where(
-                        Package.registry == "npm",
-                        Package.normalized_name == name.lower(),
-                    )
-                ).scalar_one_or_none()
-                if pkg:
-                    for s in stats:
-                        existing = db.execute(
-                            select(DownloadStat).where(
-                                DownloadStat.package_id == pkg.id,
-                                DownloadStat.period == s.period,
-                                DownloadStat.date == s.date,
-                            )
-                        ).scalar_one_or_none()
-                        if existing is None:
-                            db.add(DownloadStat(
-                                package_id=pkg.id,
-                                period=s.period,
-                                date=s.date,
-                                download_count=s.download_count,
-                            ))
-                        else:
-                            existing.download_count = s.download_count
-                processed += 1
-            except Exception:
-                logger.warning("Failed to fetch downloads for %s", name)
+        fetched = _run_async(_fetch_npm_downloads_batch(client, package_names))
 
-        _run_async(client.close())
+        for name, stats in fetched:
+            pkg = db.execute(
+                select(Package).where(
+                    Package.registry == "npm",
+                    Package.normalized_name == name.lower(),
+                )
+            ).scalar_one_or_none()
+            if pkg:
+                for s in stats:
+                    existing = db.execute(
+                        select(DownloadStat).where(
+                            DownloadStat.package_id == pkg.id,
+                            DownloadStat.period == s.period,
+                            DownloadStat.date == s.date,
+                        )
+                    ).scalar_one_or_none()
+                    if existing is None:
+                        db.add(DownloadStat(
+                            package_id=pkg.id,
+                            period=s.period,
+                            date=s.date,
+                            download_count=s.download_count,
+                        ))
+                    else:
+                        existing.download_count = s.download_count
+            processed += 1
+
         db.commit()
-        return CrawlBatchResult(processed=processed)
+        return asdict(CrawlBatchResult(processed=processed))
     except Exception as e:
         db.rollback()
         raise e

@@ -1,6 +1,7 @@
 """Celery tasks for computing reputation scores."""
 
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 from celery import shared_task
@@ -42,7 +43,7 @@ def compute_reputation_score(
         ).scalar_one_or_none()
 
         if not pkg:
-            return ScoreComputeError(error="package not found")
+            return asdict(ScoreComputeError(error="package not found"))
 
         # Count releases and get latest version
         release_count: int = db.execute(
@@ -149,9 +150,9 @@ def compute_reputation_score(
             "Computed reputation for package %d: %.4f",
             package_id, result.overall_score,
         )
-        return ScoreComputeResult(
+        return asdict(ScoreComputeResult(
             package_id=package_id, overall_score=result.overall_score
-        )
+        ))
     except Exception as e:
         db.rollback()
         logger.exception("Failed to compute score for package %d", package_id)
@@ -174,6 +175,6 @@ def recompute_all_scores(batch_size: int = 500) -> RecomputeAllResult:
 
         total: int = len(pkg_ids)
         logger.info("Queued score recomputation for %d packages", total)
-        return RecomputeAllResult(queued=total)
+        return asdict(RecomputeAllResult(queued=total))
     finally:
         remove_task_session()

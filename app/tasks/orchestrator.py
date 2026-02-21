@@ -1,6 +1,7 @@
 """Orchestrator task that chains the full crawl pipeline."""
 
 import logging
+from dataclasses import asdict
 
 from celery import chain, shared_task
 
@@ -24,4 +25,4 @@ def run_full_crawl() -> FullCrawlResult:
     )
     pipeline.apply_async()
     logger.info("Full crawl pipeline dispatched")
-    return FullCrawlResult(status="dispatched")
+    return asdict(FullCrawlResult(status="dispatched"))

@@ -90,7 +90,7 @@ def execute_search(db: Session, params: SearchParams) -> SearchResponse:
     items: list[SearchResultItem] = [
         SearchResultItem(
             id=row.id,
-            registry=row.registry,
+            registry=row.registry.value if hasattr(row.registry, 'value') else str(row.registry),
             name=row.name,
             summary=row.summary,
             overall_score=float(row.overall_score),

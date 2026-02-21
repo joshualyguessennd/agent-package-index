@@ -46,5 +46,10 @@ celery_app.conf.update(
     },
 )
 
-# Auto-discover tasks in app.tasks package
-celery_app.autodiscover_tasks(["app.tasks"])
+# Explicitly import all task modules so Celery registers them
+import app.tasks.compute_scores  # noqa: F401, E402
+import app.tasks.crawl_npm  # noqa: F401, E402
+import app.tasks.crawl_pypi  # noqa: F401, E402
+import app.tasks.crawl_vulnerabilities  # noqa: F401, E402
+import app.tasks.example  # noqa: F401, E402
+import app.tasks.orchestrator  # noqa: F401, E402
