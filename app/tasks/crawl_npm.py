@@ -1,0 +1,206 @@
+"""Celery tasks for crawling npm packages."""
+
+import asyncio
+import logging
+from datetime import datetime, timezone
+
+from celery import shared_task
+from sqlalchemy import select
+
+from app.models import CrawlState, DownloadStat, Package, PackageVersion
+from app.schemas.tasks import CrawlBatchResult, CrawlDetailResult, CrawlListResult
+from app.services.crawlers.npm_client import NpmClient
+from app.tasks._db import get_task_session, remove_task_session
+
+logger = logging.getLogger(__name__)
+
+
+def _run_async(coro: object) -> object:
+    """Run an async coroutine in a new event loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+@shared_task(name="crawl_npm_package_list")
+def crawl_npm_package_list() -> CrawlListResult:
+    """Crawl npm registry changes feed. Incremental via CouchDB seq."""
+    db = get_task_session()
+    try:
+        state = db.execute(
+            select(CrawlState).where(
+                CrawlState.registry == "npm",
+                CrawlState.task_type == "package_list",
+            )
+        ).scalar_one_or_none()
+        since_seq: str = state.cursor if state and state.cursor else "0"
+
+        client = NpmClient()
+        result = _run_async(client.fetch_changes(since_seq))
+        _run_async(client.close())
+
+        new_count: int = 0
+        for name in result.package_names:
+            normalized: str = name.lower()
+            existing = db.execute(
+                select(Package).where(
+                    Package.registry == "npm",
+                    Package.normalized_name == normalized,
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(Package(
+                    registry="npm",
+                    name=name,
+                    normalized_name=normalized,
+                ))
+            new_count += 1
+
+        now = datetime.now(tz=timezone.utc)
+        if result.last_seq:
+            if state is None:
+                db.add(CrawlState(
+                    registry="npm",
+                    task_type="package_list",
+                    cursor=result.last_seq,
+                    status="completed",
+                    last_run_at=now,
+                ))
+            else:
+                state.cursor = result.last_seq
+                state.status = "completed"
+                state.last_run_at = now
+
+        db.commit()
+        logger.info("npm package list crawl: %d packages processed", new_count)
+        return CrawlListResult(processed=new_count, cursor=result.last_seq)
+    except Exception as e:
+        db.rollback()
+        logger.exception("npm package list crawl failed")
+        raise e
+    finally:
+        remove_task_session()
+
+
+@shared_task(name="crawl_npm_package_detail")
+def crawl_npm_package_detail(package_name: str) -> CrawlDetailResult:
+    """Crawl detail for a single npm package and upsert into the database."""
+    db = get_task_session()
+    try:
+        client = NpmClient()
+        metadata = _run_async(client.fetch_package_detail(package_name))
+        versions = _run_async(client.fetch_versions(package_name))
+        _run_async(client.close())
+
+        maintainers_json: list[dict[str, str | None]] = [
+            {"name": m.name, "email": m.email} for m in metadata.maintainers
+        ]
+
+        pkg = db.execute(
+            select(Package).where(
+                Package.registry == "npm",
+                Package.normalized_name == metadata.normalized_name,
+            )
+        ).scalar_one_or_none()
+
+        now = datetime.now(tz=timezone.utc)
+
+        if pkg is None:
+            pkg = Package(registry="npm", name=metadata.name,
+                          normalized_name=metadata.normalized_name)
+            db.add(pkg)
+
+        pkg.summary = metadata.summary
+        pkg.description = metadata.description
+        pkg.homepage_url = metadata.homepage_url
+        pkg.repository_url = metadata.repository_url
+        pkg.license = metadata.license
+        pkg.keywords = metadata.keywords
+        pkg.author = metadata.author
+        pkg.author_email = metadata.author_email
+        pkg.maintainers = maintainers_json
+        pkg.first_release_at = metadata.first_release_at
+        pkg.latest_release_at = metadata.latest_release_at
+        pkg.is_deprecated = metadata.is_deprecated
+        pkg.crawled_at = now
+
+        db.flush()
+
+        for v in versions:
+            existing_ver = db.execute(
+                select(PackageVersion).where(
+                    PackageVersion.package_id == pkg.id,
+                    PackageVersion.version == v.version,
+                )
+            ).scalar_one_or_none()
+            if existing_ver is None:
+                db.add(PackageVersion(
+                    package_id=pkg.id,
+                    version=v.version,
+                    release_date=v.release_date,
+                    dependencies=v.dependencies,
+                    dep_count=v.dep_count,
+                    size_bytes=v.size_bytes,
+                    is_yanked=v.is_yanked,
+                    is_latest=v.is_latest,
+                ))
+
+        db.commit()
+        logger.info("npm detail crawl: %s", package_name)
+        return CrawlDetailResult(package=package_name, status="ok")
+    except Exception as e:
+        db.rollback()
+        logger.exception("npm detail crawl failed for %s", package_name)
+        raise e
+    finally:
+        remove_task_session()
+
+
+@shared_task(name="crawl_npm_downloads_batch")
+def crawl_npm_downloads_batch(package_names: list[str]) -> CrawlBatchResult:
+    """Crawl download stats for a batch of npm packages."""
+    db = get_task_session()
+    processed: int = 0
+    try:
+        client = NpmClient()
+        for name in package_names:
+            try:
+                stats = _run_async(client.fetch_downloads(name))
+                pkg = db.execute(
+                    select(Package).where(
+                        Package.registry == "npm",
+                        Package.normalized_name == name.lower(),
+                    )
+                ).scalar_one_or_none()
+                if pkg:
+                    for s in stats:
+                        existing = db.execute(
+                            select(DownloadStat).where(
+                                DownloadStat.package_id == pkg.id,
+                                DownloadStat.period == s.period,
+                                DownloadStat.date == s.date,
+                            )
+                        ).scalar_one_or_none()
+                        if existing is None:
+                            db.add(DownloadStat(
+                                package_id=pkg.id,
+                                period=s.period,
+                                date=s.date,
+                                download_count=s.download_count,
+                            ))
+                        else:
+                            existing.download_count = s.download_count
+                processed += 1
+            except Exception:
+                logger.warning("Failed to fetch downloads for %s", name)
+
+        _run_async(client.close())
+        db.commit()
+        return CrawlBatchResult(processed=processed)
+    except Exception as e:
+        db.rollback()
+        raise e
+    finally:
+        remove_task_session()

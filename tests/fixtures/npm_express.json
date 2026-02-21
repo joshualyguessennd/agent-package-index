@@ -1,0 +1,63 @@
+{
+  "name": "express",
+  "description": "Fast, unopinionated, minimalist web framework",
+  "dist-tags": {
+    "latest": "4.18.2"
+  },
+  "versions": {
+    "4.18.1": {
+      "name": "express",
+      "version": "4.18.1",
+      "description": "Fast, unopinionated, minimalist web framework",
+      "license": "MIT",
+      "homepage": "http://expressjs.com/",
+      "dependencies": {
+        "accepts": "~1.3.8",
+        "body-parser": "1.20.0",
+        "cookie": "0.5.0",
+        "debug": "2.6.9"
+      },
+      "dist": {
+        "unpackedSize": 213000
+      }
+    },
+    "4.18.2": {
+      "name": "express",
+      "version": "4.18.2",
+      "description": "Fast, unopinionated, minimalist web framework",
+      "license": "MIT",
+      "homepage": "http://expressjs.com/",
+      "dependencies": {
+        "accepts": "~1.3.8",
+        "body-parser": "1.20.1",
+        "cookie": "0.5.0",
+        "debug": "2.6.9",
+        "depd": "2.0.0"
+      },
+      "dist": {
+        "unpackedSize": 214000
+      }
+    }
+  },
+  "time": {
+    "created": "2010-12-29T19:38:25.450Z",
+    "modified": "2023-10-12T15:00:00.000Z",
+    "4.18.1": "2022-04-29T17:30:00.000Z",
+    "4.18.2": "2022-10-08T14:00:00.000Z"
+  },
+  "maintainers": [
+    {"name": "dougwilson", "email": "doug@somethingdoug.com"},
+    {"name": "mikeal", "email": "mikeal.rogers@gmail.com"}
+  ],
+  "keywords": ["express", "framework", "web", "http", "rest", "restful", "api"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/expressjs/express.git"
+  },
+  "homepage": "http://expressjs.com/",
+  "author": {
+    "name": "TJ Holowaychuk",
+    "email": "tj@vision-media.ca"
+  },
+  "readme": "# Express\n\nFast, unopinionated, minimalist web framework for Node.js."
+}

@@ -1,0 +1,58 @@
+{
+  "info": {
+    "name": "requests",
+    "version": "2.31.0",
+    "summary": "Python HTTP for Humans.",
+    "description": "# Requests\n\nRequests is a simple HTTP library for Python.",
+    "home_page": "https://requests.readthedocs.io",
+    "author": "Kenneth Reitz",
+    "author_email": "me@kennethreitz.org",
+    "maintainer": "Seth Michael Larson",
+    "maintainer_email": "sethmlarson@gmail.com",
+    "license": "Apache-2.0",
+    "keywords": "http,requests,web",
+    "classifiers": [
+      "Development Status :: 5 - Production/Stable",
+      "Intended Audience :: Developers",
+      "License :: OSI Approved :: Apache Software License",
+      "Programming Language :: Python :: 3"
+    ],
+    "requires_python": ">=3.7",
+    "requires_dist": [
+      "charset-normalizer (<4,>=2)",
+      "idna (<4,>=2.5)",
+      "urllib3 (<3,>=1.21.1)",
+      "certifi (>=2017.4.17)"
+    ],
+    "project_urls": {
+      "Homepage": "https://requests.readthedocs.io",
+      "Documentation": "https://requests.readthedocs.io",
+      "Source": "https://github.com/psf/requests",
+      "Repository": "https://github.com/psf/requests"
+    }
+  },
+  "releases": {
+    "2.30.0": [
+      {
+        "filename": "requests-2.30.0.tar.gz",
+        "size": 128942,
+        "upload_time_iso_8601": "2023-05-03T12:00:00Z",
+        "yanked": false
+      }
+    ],
+    "2.31.0": [
+      {
+        "filename": "requests-2.31.0.tar.gz",
+        "size": 110346,
+        "upload_time_iso_8601": "2023-05-22T12:00:00Z",
+        "yanked": false
+      },
+      {
+        "filename": "requests-2.31.0-py3-none-any.whl",
+        "size": 62574,
+        "upload_time_iso_8601": "2023-05-22T12:00:00Z",
+        "yanked": false
+      }
+    ]
+  }
+}
