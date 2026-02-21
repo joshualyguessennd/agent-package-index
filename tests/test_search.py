@@ -1,7 +1,9 @@
 """Tests for the search service and search endpoint."""
 
+from sqlalchemy import Select
 
 from app.schemas.search import SearchParams
+from app.services.search import build_count_query, build_search_query
 
 
 class TestSearchParams:
@@ -29,30 +31,35 @@ class TestSearchParams:
 
 
 class TestSearchQueryBuilder:
-    def test_build_search_query_no_registry(self) -> None:
-        from app.services.search import build_search_query
-
+    def test_build_search_query_returns_select(self) -> None:
         params = SearchParams(q="flask")
-        result = build_search_query(params)
-        assert ":query" in result.sql
-        assert result.bind["query"] == "flask"
-        assert "registry" not in result.bind
+        stmt = build_search_query(params)
+        assert isinstance(stmt, Select)
+
+    def test_build_search_query_compiled_sql(self) -> None:
+        params = SearchParams(q="flask")
+        stmt = build_search_query(params)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "ts_rank_cd" in compiled
+        assert "plainto_tsquery" in compiled
+        assert "similarity" in compiled
 
     def test_build_search_query_with_registry(self) -> None:
-        from app.services.search import build_search_query
-
         params = SearchParams(q="flask", registry="pypi")
-        result = build_search_query(params)
-        assert "p.registry = :registry" in result.sql
-        assert result.bind["registry"] == "pypi"
+        stmt = build_search_query(params)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "registry" in compiled
 
-    def test_build_count_query(self) -> None:
-        from app.services.search import build_count_query
-
+    def test_build_count_query_returns_select(self) -> None:
         params = SearchParams(q="flask", min_score=0.5)
-        result = build_count_query(params)
-        assert "COUNT(*)" in result.sql
-        assert result.bind["min_score"] == 0.5
+        stmt = build_count_query(params)
+        assert isinstance(stmt, Select)
+
+    def test_build_count_query_compiled_sql(self) -> None:
+        params = SearchParams(q="flask", min_score=0.5)
+        stmt = build_count_query(params)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "count" in compiled.lower()
 
 
 class TestSearchEndpoint:

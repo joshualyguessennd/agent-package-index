@@ -1,167 +1,106 @@
 """Search query builder for the package index.
 
-Uses raw SQL via text() for PostgreSQL-specific full-text search functions
-(ts_rank_cd, plainto_tsquery, similarity) that have no ORM equivalent.
+Uses SQLAlchemy func() for PostgreSQL full-text search functions
+(ts_rank_cd, plainto_tsquery, similarity).
 """
 
-from dataclasses import dataclass, field
-
-from sqlalchemy import text
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
+from app.models import Package, ReputationScore
 from app.schemas.search import SearchParams, SearchResponse, SearchResultItem
 
 
-@dataclass
-class SearchBindParams:
-    """Bind parameters for the search SQL query."""
-
-    query: str
-    limit: int
-    offset: int
-    min_score: float
-    registry: str | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        """Convert to dict for SQLAlchemy text() bind params."""
-        result: dict[str, object] = {
-            "query": self.query,
-            "limit": self.limit,
-            "offset": self.offset,
-            "min_score": self.min_score,
-        }
-        if self.registry is not None:
-            result["registry"] = self.registry
-        return result
+def _tsquery(query: str):
+    """Build a plainto_tsquery('english', query) expression."""
+    return func.plainto_tsquery("english", query)
 
 
-@dataclass
-class CountBindParams:
-    """Bind parameters for the count SQL query."""
-
-    query: str
-    min_score: float
-    registry: str | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        """Convert to dict for SQLAlchemy text() bind params."""
-        result: dict[str, object] = {
-            "query": self.query,
-            "min_score": self.min_score,
-        }
-        if self.registry is not None:
-            result["registry"] = self.registry
-        return result
-
-
-@dataclass
-class BuiltQuery:
-    """A built SQL query with its bind parameters."""
-
-    sql: str
-    bind: dict[str, object] = field(default_factory=dict)
-
-
-def build_search_query(params: SearchParams) -> BuiltQuery:
-    """Build the search SQL query with parameterized filters.
+def build_search_query(params: SearchParams) -> Select:
+    """Build the search ORM query with semantic ranking.
 
     Combines:
     - ts_rank_cd on search_vector (60% weight)
     - reputation overall_score (30% weight)
     - trigram similarity on normalized_name (10% weight)
     """
-    bind_params = SearchBindParams(
-        query=params.q,
-        limit=params.limit,
-        offset=params.offset,
-        min_score=params.min_score,
-        registry=params.registry,
+    tsq = _tsquery(params.q)
+
+    rank = (
+        0.6 * func.ts_rank_cd(Package.search_vector, tsq)
+        + 0.3 * func.coalesce(ReputationScore.overall_score, 0)
+        + 0.1 * func.similarity(Package.normalized_name, params.q)
+    ).label("rank")
+
+    stmt = (
+        select(
+            Package.id,
+            Package.registry,
+            Package.name,
+            Package.summary,
+            func.coalesce(ReputationScore.overall_score, 0).label("overall_score"),
+            func.coalesce(ReputationScore.maintenance, 0).label("maintenance"),
+            func.coalesce(ReputationScore.vulnerability, 0).label("vulnerability"),
+            func.coalesce(ReputationScore.dependency, 0).label("dependency"),
+            func.coalesce(ReputationScore.popularity, 0).label("popularity"),
+            func.coalesce(ReputationScore.maintainer, 0).label("maintainer_score"),
+            func.coalesce(ReputationScore.license, 0).label("license_score"),
+            rank,
+        )
+        .outerjoin(ReputationScore, ReputationScore.package_id == Package.id)
+        .where(Package.search_vector.op("@@")(tsq))
+        .where(func.coalesce(ReputationScore.overall_score, 0) >= params.min_score)
+        .order_by(rank.desc())
+        .limit(params.limit)
+        .offset(params.offset)
     )
 
-    registry_filter: str = ""
     if params.registry:
-        registry_filter = "AND p.registry = :registry"
+        stmt = stmt.where(Package.registry == params.registry)
 
-    sql: str = f"""
-        SELECT
-            p.id,
-            p.registry,
-            p.name,
-            p.summary,
-            COALESCE(r.overall_score, 0) AS overall_score,
-            COALESCE(r.maintenance, 0) AS maintenance,
-            COALESCE(r.vulnerability, 0) AS vulnerability,
-            COALESCE(r.dependency, 0) AS dependency,
-            COALESCE(r.popularity, 0) AS popularity,
-            COALESCE(r.maintainer, 0) AS maintainer_score,
-            COALESCE(r.license, 0) AS license_score,
-            (
-                0.6 * ts_rank_cd(
-                    p.search_vector,
-                    plainto_tsquery('english', :query)
-                ) +
-                0.3 * COALESCE(r.overall_score, 0) +
-                0.1 * similarity(p.normalized_name, :query)
-            ) AS rank
-        FROM package p
-        LEFT JOIN reputation_score r ON r.package_id = p.id
-        WHERE p.search_vector @@ plainto_tsquery('english', :query)
-            AND COALESCE(r.overall_score, 0) >= :min_score
-            {registry_filter}
-        ORDER BY rank DESC
-        LIMIT :limit OFFSET :offset
-    """
-
-    return BuiltQuery(sql=sql, bind=bind_params.to_dict())
+    return stmt
 
 
-def build_count_query(params: SearchParams) -> BuiltQuery:
+def build_count_query(params: SearchParams) -> Select:
     """Build the count query for total results."""
-    bind_params = CountBindParams(
-        query=params.q,
-        min_score=params.min_score,
-        registry=params.registry,
+    tsq = _tsquery(params.q)
+
+    stmt = (
+        select(func.count())
+        .select_from(Package)
+        .outerjoin(ReputationScore, ReputationScore.package_id == Package.id)
+        .where(Package.search_vector.op("@@")(tsq))
+        .where(func.coalesce(ReputationScore.overall_score, 0) >= params.min_score)
     )
 
-    registry_filter: str = ""
     if params.registry:
-        registry_filter = "AND p.registry = :registry"
+        stmt = stmt.where(Package.registry == params.registry)
 
-    sql: str = f"""
-        SELECT COUNT(*)
-        FROM package p
-        LEFT JOIN reputation_score r ON r.package_id = p.id
-        WHERE p.search_vector @@ plainto_tsquery('english', :query)
-            AND COALESCE(r.overall_score, 0) >= :min_score
-            {registry_filter}
-    """
-
-    return BuiltQuery(sql=sql, bind=bind_params.to_dict())
+    return stmt
 
 
 def execute_search(db: Session, params: SearchParams) -> SearchResponse:
     """Execute a search query and return a structured response."""
-    search_q = build_search_query(params)
-    count_q = build_count_query(params)
+    search_stmt = build_search_query(params)
+    count_stmt = build_count_query(params)
 
-    rows = db.execute(text(search_q.sql), search_q.bind).fetchall()
-    count_row = db.execute(text(count_q.sql), count_q.bind).fetchone()
-    total: int = count_row[0] if count_row else 0
+    rows = db.execute(search_stmt).fetchall()
+    total: int = db.execute(count_stmt).scalar_one()
 
     items: list[SearchResultItem] = [
         SearchResultItem(
-            id=row[0],
-            registry=row[1],
-            name=row[2],
-            summary=row[3],
-            overall_score=float(row[4]),
-            maintenance=float(row[5]),
-            vulnerability=float(row[6]),
-            dependency=float(row[7]),
-            popularity=float(row[8]),
-            maintainer_score=float(row[9]),
-            license_score=float(row[10]),
-            rank=float(row[11]),
+            id=row.id,
+            registry=row.registry,
+            name=row.name,
+            summary=row.summary,
+            overall_score=float(row.overall_score),
+            maintenance=float(row.maintenance),
+            vulnerability=float(row.vulnerability),
+            dependency=float(row.dependency),
+            popularity=float(row.popularity),
+            maintainer_score=float(row.maintainer_score),
+            license_score=float(row.license_score),
+            rank=float(row.rank),
         )
         for row in rows
     ]
